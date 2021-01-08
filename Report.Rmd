@@ -1,0 +1,224 @@
+---
+title: "Board Game Analysis"
+author: "Jeff Warchall"
+date: "1/8/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE, echo = FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Executive Summary
+
+BoardGameGeek (https://boardgamegeek.com) is a website that collects user reviews of boardgames in order to rank them from best to worst.  The purpose of this analysis is to determine if there is any pattern in the data collected by BoardGameGeek and if there are some attributes of different games that can predict how popular or well recieved the game is by the community.  The data set used for this project contains approximately 5,000 records.  Each record represents a single board game and includes the following information:
+
+* Rank from most highly to least highly rated
+* Game ID
+* Name of the game
+* Minimum and maximum number of players
+* Minimum, maximum, and average play time
+* Year of release
+* Average rating of the user community
+* Geek rating, which is a weighted average to normalize games with few ratings
+* Number of times the game has been rated
+* Minimum recommended age for players
+* Game mechanics
+* Number of people who have reported buying the game
+* Category of the game
+* Designer of the game
+* Weight, which is the community's assessment of how complex the game is from simple (1) to complex (5)
+
+To perform this analysis the dataset has been split into an approximately 85% / 15% partition with the larger set used to train the models and the smaller set used to validate the performance of the models. 
+A linear model attempts to predict the average rating of a game based on how complex it is as there appears to be a preference for more complex games in this community.  Next, a decision tree is used to attempt to predict whether or not a game will be among the top 10% most highly rated games based on features such as the game mechanics and category of the game. 
+
+
+```{r Load Data, echo = FALSE, message = FALSE}
+# Load Packages
+if (!require(corrplot)) install.packages("corrplot")
+library(corrplot)
+if (!require(tidyverse)) install.packages("tidyverse")
+library(tidyverse)
+if (!require(caret)) install.packages("caret")
+library(caret)
+if (!require(dslabs)) install.packages("dslabs")
+library(dslabs)
+if (!require(rpart)) install.packages("rpart")
+library(rpart)
+
+# Load Data
+#data_path <- "C:\\Users\\jeffw\\R projects\\BBG\\bgg_db_1806.csv"
+
+#data_raw <- read.csv(data_path)
+```
+
+## Methods and Analysis
+
+First we will check the data for missing values and also examine some of the variables to see if any cleaning needs to be done.
+
+```{r Clean Data 1, echo = FALSE, message = FALSE}
+# Clean Data 1
+# Check the raw data for NA's
+sum(is.na(data_raw))
+
+# Look for duplicated vales
+apply(apply(data_raw, 2, duplicated), 2 ,sum)
+
+# Check for duplicates in the names column 
+dup_names <- which(duplicated(data_raw$names))
+data_raw[dup_names,]$names
+data_raw %>% filter(names %in% data_raw[dup_names,]$names) %>% select(game_id, names, year) %>% arrange(names)
+# Note that the duplicated names seem to be re-released games with unique game_id's, so we will retain them
+
+# Partition Data
+set.seed(5, sample.kind = "Rounding")
+test_index <- createDataPartition(data_raw$rank, times = 1, p = 0.15, list = FALSE)
+test <- data_raw[test_index,] %>% select(!bgg_url) %>% select(!image_url)
+train <- data_raw[-test_index,] %>% select(!bgg_url) %>% select(!image_url)
+
+```
+
+At first it appears that some games have duplicate records, however upon closer inspection it is apparent that these correspond to the same game that was revised and re-released at a later date, so these records will be retained as unique game versions. 
+
+Next, we will examine a correlation matrix to see if there are any obbvious relationships between some of these variables.  Note, that for this plot only numeric variables can be examined:
+
+```{r Cor Plot, echo = FALSE, message = FALSE, fig.cap = "Figure 1: Correlation Matrix"}
+# Explore Data 1
+# First we construct a correlation plot between the numeric variables to visualize any relationships
+numeric_variables <- c("rank", "min_players", "max_players", "avg_time", "min_time", "max_time", "year", "avg_rating", "geek_rating",
+                       "num_votes", "age", "owned", "weight")
+corrplot(cor(select(data_raw, numeric_variables)))
+
+```
+
+This plot demonstrates that there are some relationships between some of the variable; unfortuneately, some of these correlations are not very useful.  For example, average game time is correlated with both minimum and maximum time, which is a trivial observation.  It is worth noting that how many people report owwning a given game and the number of times that the game is rated does correlate with a more highly ranked game.  The most interesting feature here is that it appears that the weight of the game (complexity) appears to correlate with good ratings.
+
+Next we look at the average rating versus the "geek" rating.  As we see from the following plot, there is a capping effect built into the "geek" rating such that a game with a small number of very high ratings does not overwhelm the overall ranking system.
+
+```{r Rating Plot, echo = FALSE, message = FALSE}
+# Compare the average rating against the "geek rating" to see how the website normalizes average rating for games
+# with few votes
+plot(train$avg_rating, train$geek_rating)
+```
+
+This capping effect can also be visualized by comparing the next three histograms where we see that the average ratings are similar to a normal distribution whereas the "geek" ratings are skewed toward the bottom.  This is because games with few ratings are normalized toward a lower rating so that the website will not rank a game very highly if it has not been reviewed by enough people.
+```{r Average Histogram, echo = FALSE, message = FALSE}
+# Histogram of average ratings
+hist(train$avg_rating)
+```
+
+```{r Geek hist, echo = FALSE, message = FALSE}
+# Histogram of geek rating
+hist(train$geek_rating)
+```
+
+```{r Num Hist, echo = FALSE, message = FALSE}
+# Histogram of number of times the games were rated
+hist(train$num_votes)
+```
+
+Next we look at the complexity of the game by the year of release.  There might be a small effect here where newer games are more complex, but this relationship cannot be firmly established because there are not enough games released before the year 2000 to make a strong correlatioon possible.
+
+```{r Year Weight Plot, echo = FALSE, message = FALSE}
+# Plot of game complexity against year of release
+train %>% filter( year >= 1950) %>% ggplot(aes(year, weight)) + geom_point()
+```
+
+The next plot shows a promising and seemingly linear relationship between the weight (or complexity) of the game is positively correlated to the community's favorable ratings.
+
+```{r Average Weight Plot, echo = FALSE, message = FALSE}
+# Plot of average rating against complexity
+train %>% ggplot(aes(weight, avg_rating)) + geom_point()
+```
+
+The next plot examines the "geek" rating versus the weight of the games.  Here the relationship is less strong, again most likely due to the capping system that BoardGameGeek uses.
+
+```{r Geek Weight Plot, echo = FALSE, message = FALSE}
+# Plot of "geek rating" against complexity
+train %>% ggplot(aes(weight, geek_rating)) + geom_point()
+```
+
+Using this apparent relationship bewteen weight and the community's ratings we will build the following linear model and compare its predictive power to that of simply assigning the mean rating to all games.
+
+```{r Linear Model, echo = FALSE, message = FALSE}
+# Linear Model
+# Here we build a linear model based on the apparent relationship between game complexity and favorable ratings
+fit_lm <- lm(avg_rating ~ weight, data = train)
+fit_lm$coef
+y_hat_lm <- fit_lm$coef[1] + fit_lm$coef[2] * test$weight
+
+# Here we examine the usefulness of the linear model
+avg <- mean(train$avg_rating)
+mean((avg - test$avg_rating)^2)
+mean((y_hat_lm - test$avg_rating)^2)
+```
+
+As we see there is about a 29% improvement over the simple average by using the weight of the game to predict the ratings.  This suggests that you are more likely to get a good game if you select a more complex game, but this result is not particularly robust.  Next we will use a decision tree that will incorporate the differing game mechanics and "themes" (or categories) to improve these results.
+
+## Results
+
+To prepare the decsion tree we will first need to clean the data a little bit.  Both the mechanics field and the category field in the original data includes a lot of information.  For example, the game "Gloomhaven" is described as an Adventure, Exploration, Fantasy, Fighting, Miniatures game that uses the Action / Movement Programming, Co-operative Play, Grid Movement, Hand Management, Modular Board, Role Playing, Simultaneous Action Selection, Storytelling, Variable Player Powers mechanics.  This is so much information as to not be very useful.  However, the first descriptors in both of these fields are primary and likely the most important when evaluating which game to buy.  Therefore, we will extract just the information before the first comma in each of these fields and use it to build a decision tree.
+
+```{r Mech Cat, echo = FALSE, message = FALSE}
+# Clean Data 2
+# Here we extract the primary game mechanic and primary category out of the raw data, which combines multiple 
+# descriptors into a single field.  Also, we add a field called "top10" as a boolean variable that says whether or
+# not a game is in the top 10% of all games
+train <- train %>%
+  separate(mechanic, into = "mech_1", sep = ",", extra = "drop") %>%
+  separate(category, into = "cat_1", sep = ",", extra = "drop") %>%
+  mutate(top10 = as.factor(rank < length(data_raw$rank) * 0.1))
+
+test <- test %>%
+  separate(mechanic, into = "mech_1", sep = ",", extra = "drop") %>%
+  separate(category, into = "cat_1", sep = ",", extra = "drop") %>%
+  mutate(top10 = rank < length(data_raw$rank) * 0.1)
+```
+
+Having cleaned the mechanic and categoryy fields we will now plot the mean rating of each unique combination of mechanic and category.  The next plot shows that more common mechanic/category combinations tend to be poorly rated.  This is not to say that all unique combinations are winners, just that it appears that sticking to an old formula tends to lead to a worse game.
+
+
+```{r Mech Cat Plot, echo = FALSE, message = FALSE}
+# Explore Data 2
+# Plot of mean ratings within game mechanic / category combinations (i.e., average rating among economic card games 
+# or war board games)
+train %>%
+  group_by(mech_1, cat_1) %>%
+  select(names, mech_1, cat_1, geek_rating) %>%
+  summarize(mean_rating = mean(geek_rating), n = n()) %>%
+  ggplot(aes(n, mean_rating)) + geom_point()
+
+```
+
+With this knowledge in hand, we can expect that the mechanics and categories will help us identify good games.  The following decision tree uses this information to try to predict whether or not a given game will be in the top 10% of all games.  First we build a simple tree using the information gleaned for the correlation matrix and use only the number of votes and the number of owners to predict good games.  Then we will see how much the prediction can be improved by incorporating the mechanics and categories.
+
+
+```{r Trees, echo = FALSE, message = FALSE}
+# Decision Tree
+# Here we compare decision trees designed predict whether or not a game is in the top 10%.  First we look at the 
+# more obvious correlation between game ownership and game ranking, then we see how much the predictive power can
+# be improved by adding in game mechanics and category
+fit_tree1 <- rpart(top10 ~ num_votes + owned,
+                   data = train, control = rpart.control(cp = 0, minsplit = 5))
+
+fit_tree2 <- rpart(top10 ~ num_votes + owned + mech_1 + cat_1 + weight,
+                   data = train, control = rpart.control(cp = 0, minsplit = 5))
+
+y_hat_tree1 <- predict(fit_tree1, test, type = "class")
+y_hat_tree2 <- predict(fit_tree2, test, type = "class")
+
+
+# Finally, we see how much the model improves by including category, mechanics, and complexity
+mean(y_hat_tree1 == test$top10)
+mean(y_hat_tree2 == test$top10)
+
+```
+
+Here we see that using only the number of votes and owners the model correctly classifies a game 90.6%, which is not very good as simply predicting that every game is not in the top 10% will, by definition, be correct 90% of the time.  By using mechanics and categories this is improved to 94.3%.  
+
+## Conclusions and Future Work
+
+Overall it was difficult to discern any particularly useful patterns in this data other than trivial ones.  For example, the fact that highly rated games are owned by more people is a strong pattern in the data, but also not very interesting as we would, of course, expect good games to be purchased by more people.  BoardGameGeek's "geek" rating is also perhaps a misleading variable because it might have the unintended consequence of hiding very good games that suffer from low distribution.  
+
+We were able to create a decsion tree model which helps to predict top 10% games, but the accuracy was only 94.3%.  This is significantly better than random guessing, but would need to be improved in order to be particularly useful.  There is also a potential bias in this data as the ratings on BoardGameGeek are likely to skew toward serious board game enthusiasts and so might not be a good reflection of the opinions of the general public.  It may be more useful to add additional data gathered from other sources to rectify this bias.
+
